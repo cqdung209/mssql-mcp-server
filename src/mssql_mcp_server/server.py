@@ -242,6 +242,95 @@ class DatabaseManager:
         except Exception as e:
             logger.error(f"Error reading table data: {e}")
             return f"[ERROR] {str(e)}"
+    
+    def get_execution_plan(self, query: str) -> Tuple[bool, Any]:
+        """Get execution plan (SHOWPLAN_XML) for a SQL query"""
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                
+                # Step 1: Enable SHOWPLAN_XML as standalone statement
+                cursor.execute("SET SHOWPLAN_XML ON")
+                cursor.nextset()  # Move to next result set if any
+                
+                # Step 2: Execute the query to get execution plan
+                cursor.execute(query)
+                
+                # Get the execution plan XML from the result
+                xml_plan = None
+                if cursor.description:
+                    row = cursor.fetchone()
+                    if row and len(row) > 0:
+                        xml_plan = str(row[0])
+                
+                cursor.nextset()  # Move to next result set if any
+                
+                # Step 3: Disable SHOWPLAN_XML as standalone statement
+                cursor.execute("SET SHOWPLAN_XML OFF")
+                cursor.nextset()  # Move to next result set if any
+                
+                if xml_plan:
+                    return True, xml_plan
+                else:
+                    return False, "No execution plan returned from query."
+                    
+        except Exception as e:
+            logger.error(f"Error getting execution plan: {e}")
+            # Try to disable SHOWPLAN_XML in case of error
+            try:
+                with self.get_connection() as conn:
+                    cursor = conn.cursor()
+                    cursor.execute("SET SHOWPLAN_XML OFF")
+            except:
+                pass
+            return False, str(e)
+    
+    def get_execution_plan_for_stored_procedure(self, proc_name: str, args: List[str]) -> Tuple[bool, Any]:
+        """Get execution plan (SHOWPLAN_XML) for a stored procedure"""
+        if not self.stored_procedure_exists(proc_name):
+            return False, f"Stored procedure '{proc_name}' does not exist."
+        
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                
+                # Step 1: Enable SHOWPLAN_XML as standalone statement
+                cursor.execute("SET SHOWPLAN_XML ON")
+                cursor.nextset()  # Move to next result set if any
+                
+                # Step 2: Execute the stored procedure to get execution plan
+                placeholders = ", ".join("?" for _ in args)
+                call_str = f"{{CALL {proc_name}({placeholders})}}" if args else f"{{CALL {proc_name}()}}"
+                cursor.execute(call_str, *args)
+                
+                # Get the execution plan XML from the result
+                xml_plan = None
+                if cursor.description:
+                    row = cursor.fetchone()
+                    if row and len(row) > 0:
+                        xml_plan = str(row[0])
+                
+                cursor.nextset()  # Move to next result set if any
+                
+                # Step 3: Disable SHOWPLAN_XML as standalone statement
+                cursor.execute("SET SHOWPLAN_XML OFF")
+                cursor.nextset()  # Move to next result set if any
+                
+                if xml_plan:
+                    return True, xml_plan
+                else:
+                    return False, "No execution plan returned from stored procedure."
+                    
+        except Exception as e:
+            logger.error(f"Error getting execution plan for stored procedure: {e}")
+            # Try to disable SHOWPLAN_XML in case of error
+            try:
+                with self.get_connection() as conn:
+                    cursor = conn.cursor()
+                    cursor.execute("SET SHOWPLAN_XML OFF")
+            except:
+                pass
+            return False, str(e)
 
 
 # ---------- Utility ----------
@@ -377,6 +466,10 @@ async def list_tools() -> list[Tool]:
                         "items": {"type": "string"},
                         "description": "Arguments for function"
                     },
+                    "get_execution_plan": {
+                        "type": "boolean",
+                        "description": "If true, returns execution plan (SHOWPLAN_XML) instead of executing the query/procedure"
+                    },
                     "server_name": {
                         "type": "string",
                         "description": "SQL Server instance name"
@@ -406,6 +499,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
     proc_args = arguments.get("proc_args", [])
     function_name = arguments.get("function_name")
     func_args = arguments.get("func_args", [])
+    get_execution_plan = arguments.get("get_execution_plan", False)
     
     # Initialize database manager
     config = DatabaseConfig(server_name, database_name)
@@ -419,14 +513,25 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
     
     # Execute based on operation type
     try:
-        if stored_proc:
-            success, result = db_manager.execute_stored_procedure(stored_proc, proc_args)
-        elif function_name:
-            success, result = db_manager.execute_function(function_name, func_args)
-        elif query:
-            success, result = db_manager.execute_query(query)
+        if get_execution_plan:
+            # Get execution plan instead of executing
+            if stored_proc:
+                success, result = db_manager.get_execution_plan_for_stored_procedure(stored_proc, proc_args)
+            elif query:
+                # Handle both regular queries and EXEC statements through get_execution_plan
+                success, result = db_manager.get_execution_plan(query)
+            else:
+                return [TextContent(type="text", text="[ERROR] Execution plan requires either query or stored_proc parameter.")]
         else:
-            return [TextContent(type="text", text="[ERROR] No valid operation provided: query, stored_proc, or function_name.")]
+            # Normal execution
+            if stored_proc:
+                success, result = db_manager.execute_stored_procedure(stored_proc, proc_args)
+            elif function_name:
+                success, result = db_manager.execute_function(function_name, func_args)
+            elif query:
+                success, result = db_manager.execute_query(query)
+            else:
+                return [TextContent(type="text", text="[ERROR] No valid operation provided: query, stored_proc, or function_name.")]
         
         if success:
             return [TextContent(type="text", text=result)]
